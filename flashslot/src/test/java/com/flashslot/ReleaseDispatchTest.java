@@ -38,6 +38,23 @@ class ReleaseDispatchTest {
         assertThat(captor.getValue().getEventType()).isEqualTo(PublishedEvent.RELEASE);
     }
 
+    @Test void resumedDispatchHasStableIdentityPerResourceVersionAndNeverReusesMinuteEvent() {
+        var work=mock(ReleaseWorkMapper.class);
+        when(work.findPendingForResource(7L)).thenReturn(List.of(42L));
+        var events=mock(com.flashslot.messaging.mapper.OutboxEventMapper.class);
+        var captor=org.mockito.ArgumentCaptor.forClass(com.flashslot.messaging.entity.OutboxEvent.class);
+        when(events.insertReleaseDispatch(captor.capture())).thenReturn(1);
+        var service=new ReleaseDispatchService(work,events,new ObjectMapper(),Clock.systemUTC());
+        var now=Instant.parse("2026-10-16T00:49:00Z");
+        service.dispatch(42,now);
+        service.dispatchOnResume(7,1,now.plusSeconds(5));
+        service.dispatchOnResume(7,1,now.plusSeconds(10));
+        service.dispatchOnResume(7,3,now.plusSeconds(15));
+        var ids=captor.getAllValues().stream().map(com.flashslot.messaging.entity.OutboxEvent::getEventId).toList();
+        assertThat(ids.get(1)).isNotEqualTo(ids.get(0)).isEqualTo(ids.get(2));
+        assertThat(ids.get(3)).isNotEqualTo(ids.get(1));
+    }
+
     @Test void dispatchEnvelopeCannotBeMistakenForANotificationOrAnotherJob() {
         var json=new ObjectMapper();
         var payload=json.createObjectNode().put("schemaVersion",1).put("jobId",42);

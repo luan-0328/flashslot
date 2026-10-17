@@ -6,9 +6,9 @@
 
 | 验证 | 最近结果 | 本机日志/报告 |
 | --- | --- | --- |
-| 完整后端回归：私有 MySQL、RabbitMQ、Redis | 268 项，0 失败、0 错误、0 跳过，打包成功 | `.run/governance-final2.log` |
+| 完整后端回归：私有 MySQL、RabbitMQ、Redis | 273 项，0 失败、0 错误、0 跳过，打包成功 | `.run/resume-fix-full.log` |
 | 独立 SQL 结构与约束检查 | 56 项通过 | `.run/governance-schema.log` |
-| 前端测试与生产构建 | 35 项通过、构建成功 | `.run/governance-web.log`、`.run/governance-web-build.log` |
+| 前端测试与生产构建 | 35 项通过、构建成功 | `.run/resume-ui-final-test.log`、`.run/resume-ui-final-build.log` |
 | 手机号模拟注册专项回归 | 7 项通过、构建成功 | `.run/phone-registration-final.log` |
 | 模拟注册启用后的前端回归 | 35 项通过 | `.run/phone-registration-web.log` |
 | Prometheus 配置和告警规则 | 官方 promtool strict lint 通过，5 条规则 | 本机临时校验工具与配置位于 `.run/prometheus-config-check/` |
@@ -54,3 +54,5 @@ pwsh -NoProfile -File scripts/verify-flashslot-foundation.ps1 -WithRedis -Test '
 ## 尚未验证的范围
 
 没有生产容量结论，未做完整备份恢复演练或 HTTPS 接入。可选 Prometheus Compose 组合未启用，告警规则未接外部通知。既有本机小规模并发冒烟与 HTTP 检查不能替代这些验收。
+
+设备恢复回归补充：同一分钟已消费的暂停派发不阻挡恢复新事件，临近截止仍可转正；新旧事件重复消费只有一个订单；派发写入失败时设备状态、任务时间与审计一起回滚，原版本可重试。恢复事件按设备版本与任务身份防重。

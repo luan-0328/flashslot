@@ -30,6 +30,7 @@ class ReviewSemanticsIntegrationTest {
     @Autowired JdbcTemplate jdbc;
     @Autowired ObjectMapper json;
     @Autowired ReleaseJobService releases;
+    @Autowired com.flashslot.messaging.service.ReleaseConsumerService consumer;
     @MockitoBean Clock clock;
     @MockitoSpyBean com.flashslot.messaging.mapper.OutboxEventMapper events;
     String owner,other;
@@ -139,5 +140,55 @@ class ReviewSemanticsIntegrationTest {
         assertThat(jdbc.queryForObject("SELECT status FROM waitlist_record WHERE resource_id=?",String.class,resource)).isEqualTo("EXPIRED");
         assertThat(jdbc.queryForObject("SELECT status FROM release_job WHERE id=?",String.class,job)).isEqualTo("RELEASED");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM booking_order WHERE release_job_id=?",Integer.class,job)).isZero();
+    }
+
+    record PausedDispatch(long job,String event,String admin) {}
+    PausedDispatch pausedDispatchNearCutoff() throws Exception {
+        String order=book();
+        mvc.perform(write("waitlists",other,"wait")).andExpect(status().isCreated());
+        jdbc.update("UPDATE resource SET status='PAUSED' WHERE id=?",resource);
+        when(clock.instant()).thenReturn(Instant.parse("2026-10-16T00:49:00Z"));
+        cancel(order);
+        long job=jdbc.queryForObject("SELECT id FROM release_job WHERE resource_id=?",Long.class,resource);
+        String event=jdbc.queryForObject("SELECT event_id FROM outbox_event WHERE event_type='RELEASE_DISPATCHED' AND aggregate_id=?",String.class,Long.toString(job));
+        jdbc.update("UPDATE outbox_event SET status='PUBLISHED' WHERE event_id=?",event);
+        consumeDispatch(event);
+        assertThat(jdbc.queryForObject("SELECT next_run_at FROM release_job WHERE id=?",java.sql.Timestamp.class,job).toInstant())
+            .isEqualTo(Instant.parse("2026-10-16T00:54:00Z"));
+        String admin="resume_admin_"+UUID.randomUUID();
+        jdbc.update("INSERT INTO app_user(username,password_hash,role) VALUES (?,'fixture','ADMIN')",admin);
+        when(clock.instant()).thenReturn(Instant.parse("2026-10-16T00:49:05Z"));
+        return new PausedDispatch(job,event,admin);
+    }
+    void consumeDispatch(String id) {
+        var event=events.selectById(id);
+        consumer.consume(new com.flashslot.messaging.model.NotificationEvent(id,event.getEventType(),event.getAggregateId(),event.getCreatedAt(),event.getPayload()));
+    }
+    org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder resume(String admin) {
+        return patch("/api/v1/admin/resources/"+resource+"/status").with(new TestUser(jdbc,admin).roles("ADMIN")).with(csrf())
+            .contentType("application/json").content("{\"version\":0,\"status\":\"ACTIVE\",\"reason\":\"resume\"}");
+    }
+    @Test void resumeInSameMinuteDispatchesNewEventAndMatchesBeforeCutoff() throws Exception {
+        var paused=pausedDispatchNearCutoff();
+        mvc.perform(resume(paused.admin())).andExpect(status().isOk());
+        var ids=jdbc.queryForList("SELECT event_id FROM outbox_event WHERE event_type='RELEASE_DISPATCHED' AND aggregate_id=? AND status='NEW'",String.class,Long.toString(paused.job()));
+        assertThat(ids).hasSize(1).doesNotContain(paused.event());
+        when(clock.instant()).thenReturn(Instant.parse("2026-10-16T00:49:30Z"));
+        consumeDispatch(ids.getFirst());consumeDispatch(ids.getFirst());consumeDispatch(paused.event());
+        assertThat(jdbc.queryForObject("SELECT status FROM waitlist_record WHERE resource_id=?",String.class,resource)).isEqualTo("MATCHED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM booking_order WHERE release_job_id=?",Integer.class,paused.job())).isEqualTo(1);
+    }
+    @Test void resumeDispatchFailureRollsBackResourceAndTaskAndCanRetry() throws Exception {
+        var paused=pausedDispatchNearCutoff();
+        doThrow(new IllegalStateException("resume dispatch unavailable")).when(events).insertReleaseDispatch(any());
+        mvc.perform(resume(paused.admin())).andExpect(status().isInternalServerError());
+        assertThat(jdbc.queryForObject("SELECT status FROM resource WHERE id=?",String.class,resource)).isEqualTo("PAUSED");
+        assertThat(jdbc.queryForObject("SELECT next_run_at FROM release_job WHERE id=?",java.sql.Timestamp.class,paused.job()).toInstant())
+            .isEqualTo(Instant.parse("2026-10-16T00:54:00Z"));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM outbox_event WHERE event_type='RELEASE_DISPATCHED' AND aggregate_id=?",Integer.class,Long.toString(paused.job()))).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT version FROM resource WHERE id=?",Long.class,resource)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM admin_audit WHERE operation='RESOURCE_STATUS' AND target_id=?",Integer.class,Long.toString(resource))).isZero();
+        reset(events);
+        mvc.perform(resume(paused.admin())).andExpect(status().isOk());
     }
 }

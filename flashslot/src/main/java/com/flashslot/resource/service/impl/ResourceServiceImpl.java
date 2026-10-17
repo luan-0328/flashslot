@@ -26,6 +26,7 @@ public class ResourceServiceImpl extends ServiceImpl<ResourceMapper, Resource> i
     private final Clock clock;
     private final com.flashslot.resource.service.ResourceLookupCache lookup;
     private final com.flashslot.waitlist.mapper.ReleaseJobMapper releaseJobs;
+    private final com.flashslot.waitlist.service.ReleaseDispatchService releaseDispatch;
 
     @Override
     @Transactional(readOnly=true)
@@ -57,10 +58,12 @@ public class ResourceServiceImpl extends ServiceImpl<ResourceMapper, Resource> i
             resource.setStatus(request.status());
             if(baseMapper.updateById(resource)!=1) throw new BusinessException(HttpStatus.CONFLICT,"VERSION_CONFLICT","设备状态已变更，请刷新后重试");
             audit.record(actor,"RESOURCE_STATUS",id,request.reason().strip());
-            // 暂停期间撮合推迟复查；恢复后立即到期，由补偿扫描在一分钟内继续派发。
-            if("ACTIVE".equals(request.status()))
+            // 设备恢复与新的唤醒事件同事务，不能被已消费的旧派发及其冷却窗口挡住。
+            if("ACTIVE".equals(request.status())) {
                 releaseJobs.update(null,Wrappers.<com.flashslot.waitlist.entity.ReleaseJob>update()
                     .eq("resource_id",id).eq("status","PENDING").gt("next_run_at",now).set("next_run_at",now));
+                releaseDispatch.dispatchOnResume(id,resource.getVersion(),now);
+            }
         }
         lookup.invalidateAfterCommit(id,request.version());
         return ResourceView.from(required(id));

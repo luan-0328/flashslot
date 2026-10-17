@@ -11,6 +11,8 @@ import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 /** 只可靠派发，不占用调度线程执行撮合。任务创建时立即派发，补偿扫描只补漏。 */
 @Service @RequiredArgsConstructor
@@ -36,9 +38,23 @@ public class ReleaseDispatchService {
      * 同一任务同一分钟使用相同事件 ID，多实例或重复调用只生成一条。
      */
     public int dispatch(long jobId,Instant now) {
-        var event=new OutboxEvent();
         Instant minute=now.truncatedTo(ChronoUnit.MINUTES);
-        event.setEventId(UUID.nameUUIDFromBytes(("release-v1:"+jobId+":"+minute).getBytes(StandardCharsets.UTF_8)).toString());
+        return dispatch(jobId,now,"release-v1:"+jobId+":"+minute);
+    }
+
+    /**
+     * 调用方持有设备排他锁并已将 PENDING 任务改为到期；与设备恢复同事务提交。
+     * 每次恢复以设备版本区分，避开旧消息冷却与同分钟 Inbox，同时同一次恢复仍可防重。
+     */
+    @Transactional(propagation=Propagation.MANDATORY)
+    public void dispatchOnResume(long resourceId,long resourceVersion,Instant now) {
+        for(long jobId:work.findPendingForResource(resourceId))
+            dispatch(jobId,now,"release-resume-v1:"+resourceId+":"+resourceVersion+":"+jobId);
+    }
+
+    private int dispatch(long jobId,Instant now,String identity) {
+        var event=new OutboxEvent();
+        event.setEventId(UUID.nameUUIDFromBytes(identity.getBytes(StandardCharsets.UTF_8)).toString());
         event.setEventType(PublishedEvent.RELEASE);
         event.setAggregateId(Long.toString(jobId));
         event.setPayload(json.createObjectNode().put("schemaVersion",1).put("jobId",jobId));

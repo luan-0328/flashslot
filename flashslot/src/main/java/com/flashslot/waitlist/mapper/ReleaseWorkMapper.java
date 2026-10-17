@@ -21,6 +21,10 @@ public interface ReleaseWorkMapper {
         """)
     List<Long> findDispatchable(@Param("now") Instant now,@Param("recent") Instant recent);
 
+    /** 调用方持有设备排他锁，恢复操作与任务处理不会并发改变这一集合。 */
+    @Select("SELECT id FROM release_job WHERE resource_id=#{resourceId} AND status='PENDING' ORDER BY id")
+    List<Long> findPendingForResource(long resourceId);
+
     @Select(
             "SELECT id FROM release_job WHERE status='PENDING' AND next_run_at<=#{now} ORDER BY"
                 + " next_run_at,id LIMIT 50")
